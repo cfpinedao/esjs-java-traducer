@@ -1,0 +1,2 @@
+consola.escribir("Hola, EsJS")
+consola.escribir(2 + 3)

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.tokens
+*.interp
+generated/*.py
+!generated/__init__.py

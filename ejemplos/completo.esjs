@@ -1,0 +1,67 @@
+// Ejemplo completo: variables, control, funciones, clases, switch, arreglos, objetos
+
+const PI = 3.14159
+mut contador = 0
+
+funcion factorial(n) {
+  si (n <= 1) {
+    retornar 1
+  }
+  retornar n * factorial(n - 1)
+}
+
+clase Animal {
+  constructor(nombre) {
+    this.nombre = nombre
+  }
+  saludar() {
+    consola.escribir("Soy " + this.nombre)
+  }
+}
+
+clase Perro extiende Animal {
+  constructor(nombre, raza) {
+    super(nombre)
+    this.raza = raza
+  }
+  ladrar() {
+    consola.escribir(this.nombre + " (" + this.raza + ") dice guau")
+  }
+}
+
+const p = crear Perro("Rex", "Labrador")
+p.saludar()
+p.ladrar()
+
+consola.escribir(factorial(5))
+
+para (mut i = 0; i < 3; i = i + 1) {
+  consola.escribir(i)
+}
+
+const numeros = [10, 20, 30]
+mut suma = 0
+para (const n de numeros) {
+  suma = suma + n
+}
+consola.escribir(suma)
+
+elegir (suma) {
+  caso 60:
+    consola.escribir("sesenta")
+    romper
+  caso 100:
+    consola.escribir("cien")
+    romper
+  porDefecto:
+    consola.escribir("otro")
+}
+
+const persona = { nombre: "Ana", edad: 30 }
+consola.escribir(persona.nombre)
+
+const cuadrado = (x) => x * x
+consola.escribir(cuadrado(7))
+
+consola.escribir(Mate.raizCuadrada(16))
+consola.escribir(absoluto(-42))
