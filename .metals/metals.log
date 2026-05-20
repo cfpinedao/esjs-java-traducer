@@ -1,0 +1,22 @@
+2026.05.19 18:38:15 INFO  Database: jdbc:h2:file:/home/jemg/Documents/esjs-java-traducer/.metals/metals (H2 2.4)[0m
+2026.05.19 18:38:15 WARN  Using H2 2.4.240 which is newer than the version Flyway has been verified with. The latest verified version of H2 is 2.3.232.[0m
+2026.05.19 18:38:15 INFO  Schema history table "PUBLIC"."flyway_schema_history" does not exist yet[0m
+2026.05.19 18:38:15 INFO  Successfully validated 7 migrations (execution time 00:00.009s)[0m
+2026.05.19 18:38:15 INFO  Creating Schema History table "PUBLIC"."flyway_schema_history" ...[0m
+2026.05.19 18:38:15 INFO  Current version of schema "PUBLIC": << Empty Schema >>[0m
+2026.05.19 18:38:15 INFO  Migrating schema "PUBLIC" to version "1 - Create tables"[0m
+2026.05.19 18:38:15 INFO  Migrating schema "PUBLIC" to version "2 - Server discovery"[0m
+2026.05.19 18:38:15 INFO  Migrating schema "PUBLIC" to version "3 - Jar symbols"[0m
+2026.05.19 18:38:15 INFO  Migrating schema "PUBLIC" to version "4 - Fingerprints"[0m
+2026.05.19 18:38:15 INFO  Migrating schema "PUBLIC" to version "5 - Jar type hierarchy"[0m
+2026.05.19 18:38:15 INFO  Migrating schema "PUBLIC" to version "6 - Delete indices"[0m
+2026.05.19 18:38:15 INFO  Migrating schema "PUBLIC" to version "7 - Toplevel members"[0m
+2026.05.19 18:38:15 INFO  Successfully applied 7 migrations to schema "PUBLIC", now at version v7 (execution time 00:00.153s)[0m
+2026.05.19 18:38:15 WARN  no build tool detected in workspace '/home/jemg/Documents/esjs-java-traducer'. The most common cause for this problem is that the editor was opened in the wrong working directory, for example if you use sbt then the workspace directory should contain build.sbt. [0m
+2026.05.19 18:38:16 WARN  Build server is not auto-connectable.[0m
+2026.05.19 18:58:30 WARN  no build target for: /home/jemg/Documents/esjs-java-traducer/Programa.java[0m
+2026.05.19 18:58:30 INFO  no build target found for /home/jemg/Documents/esjs-java-traducer/Programa.java. Using fallback presentation compiler.[0m
+2026.05.19 18:58:31 INFO  no build target found for /home/jemg/Documents/esjs-java-traducer/Programa.java. Using fallback presentation compiler.[0m
+2026.05.19 18:58:31 INFO  no build target found for /home/jemg/Documents/esjs-java-traducer/Programa.java. Using fallback presentation compiler.[0m
+2026.05.19 18:58:33 INFO  time: code lens generation in 1.4s[0m
+2026.05.19 18:58:35 INFO  no build target found for /home/jemg/Documents/esjs-java-traducer/Programa.java. Using fallback presentation compiler.[0m
