@@ -137,6 +137,7 @@ expresion
     | NAN_                                                                  #ExprNaN
     | THIS                                                                  #ExprThis
     | SUPER                                                                 #ExprSuper
+    | AMBIENTE                                                              #ExprAmbiente
     | CONSOLA                                                               #ExprConsola
     | MATE                                                                  #ExprMate
     | ID                                                                    #ExprId
@@ -153,11 +154,12 @@ memberName
     | LANZAR | CONST | MUT | VAR | EN | DE | FUNCION | CLASE | EXTIENDE
     | CONSTRUCTOR | SUPER | CREAR | ELIMINAR | TIPO_DE | INSTANCIA_DE
     | VERDADERO | FALSO | NULO | INDEFINIDO | INFINITO | NAN_
-    | THIS | CONSOLA | MATE
+    | THIS | AMBIENTE | CONSOLA | MATE
     ;
 
 propiedad
     : (ID | STR | NUM) COLON expresion                                      #PropConValor
+    | ID parametros bloque                                                  #PropMetodo
     | ID                                                                    #PropShorthand
     ;
 
@@ -202,6 +204,7 @@ INDEFINIDO   : 'indefinido' ;
 INFINITO     : 'Infinito' ;
 NAN_         : 'NuN' ;
 THIS         : 'this' ;
+AMBIENTE     : 'ambiente' ;
 CONSOLA      : 'consola' ;
 MATE         : 'Mate' ;
 

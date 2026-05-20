@@ -39,7 +39,7 @@ CONSOLA_METODOS = {
     "error":    "System.err.println",
 }
 
-# Math.X — todos los metodos de Mate se mapean a Math.<nombre>
+# Math.X — metodos basicos: lowercase -> Java Math method
 MATE_METODOS = {
     "absoluto":     "abs",
     "raizCuadrada": "sqrt",
@@ -53,6 +53,33 @@ MATE_METODOS = {
     "tangente":     "tan",
     "logaritmo":    "log",
     "exponencial":  "exp",
+}
+
+# Mate.X constantes — Java no tiene LN2, LN10, etc. directos, los reemplazamos por expresiones equivalentes.
+MATE_CONSTS_ESPECIAL = {
+    "LN2":     "Math.log(2)",
+    "LN10":    "Math.log(10)",
+    "LOG2E":   "(1.0 / Math.log(2))",
+    "LOG10E":  "(1.0 / Math.log(10))",
+    "SQRT2":   "Math.sqrt(2)",
+    "SQRT1_2": "Math.sqrt(0.5)",
+}
+
+# Numero.X — propiedades estaticas (sin parentesis) que se acceden via miembro.
+# Funciones "globales" reservadas que se invocan sin prefijo (absoluto(-5) etc.)
+FUNCIONES_GLOBALES = {
+    "absoluto": "Math.abs",
+}
+
+NUMERO_PROPS = {
+    "POSITIVE_INFINITY": "Double.POSITIVE_INFINITY",
+    "NEGATIVE_INFINITY": "Double.NEGATIVE_INFINITY",
+    "MAX_VALUE":         "Double.MAX_VALUE",
+    "MIN_VALUE":         "Double.MIN_VALUE",
+    "MAX_SAFE_INTEGER":  "9007199254740991L",
+    "MIN_SAFE_INTEGER":  "-9007199254740991L",
+    "EPSILON":           "2.220446049250313e-16",
+    "NaN":               "Double.NaN",
 }
 
 
@@ -78,6 +105,11 @@ def _strip_quotes(s):
     return s
 
 
+def _is_id_named(node, name):
+    """True si node es un ExprIdContext cuyo identificador es `name`."""
+    return isinstance(node, EsJsParser.ExprIdContext) and node.ID().getText() == name
+
+
 # ============================================================
 # JavaEmitter
 # ============================================================
@@ -85,10 +117,8 @@ def _strip_quotes(s):
 class JavaEmitter(EsJsVisitor):
     """
     Emite codigo Java. Reparte la salida en dos buffers:
-      - class_members: metodos static + clases anidadas estaticas (entre 'class Programa {' y main).
+      - class_members: metodos static + clases anidadas estaticas + campos hoisteados (entre 'class Programa {' y main).
       - main_body:     sentencias de nivel superior, dentro de 'public static void main'.
-
-    El flag self.in_main decide a cual buffer va cada emit().
     """
 
     CLASS_NAME = "Programa"
@@ -99,7 +129,10 @@ class JavaEmitter(EsJsVisitor):
         self.main_body = []
         self.indent = 0
         self.in_main = True
-        self._current_class = None   # nombre de la clase EsJS que estamos emitiendo (para el ctor)
+        self._current_class = None
+        self._hoisted_vars = set()    # 'var X' a nivel global, ya declarados como static fields
+        self._local_hoisted = set()   # 'var X' dentro de la funcion/arrow actual
+        self._needs_helpers = set()   # nombres de helpers a inyectar: _prop, _invoke, _len, _set
 
     # ---------- helpers de emision ----------
     def emit(self, line):
@@ -107,12 +140,10 @@ class JavaEmitter(EsJsVisitor):
         target.append("    " * self.indent + line)
 
     def _emit_block_body(self, stmts):
-        """Visita una lista de sentencias; si esta vacia no emite nada (Java permite {})."""
         for s in stmts:
             self.visit(s)
 
     def _emit_sentence_body(self, sentencia_ctx):
-        """Si la sentencia es un bloque, visita su contenido (ya estamos dentro de {); si no, visita la unica."""
         if isinstance(sentencia_ctx, EsJsParser.StmtBloqueContext):
             for s in sentencia_ctx.bloque().sentencia():
                 self.visit(s)
@@ -121,20 +152,22 @@ class JavaEmitter(EsJsVisitor):
 
     def output(self):
         out = []
-        # imports
-        default_imports = ["java.util.*", "java.util.function.*"]
+        default_imports = ["java.util.*", "java.util.function.*", "java.lang.reflect.*"]
         all_imports = set(default_imports) | self.imports
         for imp in sorted(all_imports):
             out.append(f"import {imp};")
         out.append("")
         out.append(f"public class {self.CLASS_NAME} {{")
         out.append("")
-        # class members (static methods + nested classes)
+        # Inyectar helpers de runtime cuando se usen
+        helpers = self._render_helpers()
+        if helpers:
+            out.extend("    " + l if l.strip() else "" for l in helpers)
+            out.append("")
         for line in self.class_members:
             out.append(("    " + line) if line.strip() else "")
         if self.class_members:
             out.append("")
-        # main
         out.append("    public static void main(String[] args) {")
         for line in self.main_body:
             out.append(("        " + line) if line.strip() else "")
@@ -142,22 +175,139 @@ class JavaEmitter(EsJsVisitor):
         out.append("}")
         return "\n".join(out) + "\n"
 
+    def _render_helpers(self):
+        lines = []
+        if "_prop" in self._needs_helpers:
+            lines += [
+                "@SuppressWarnings({\"rawtypes\",\"unchecked\"})",
+                "static Object _prop(Object o, String k) {",
+                "    if (o == null) return null;",
+                "    if (o instanceof Map) return ((Map)o).get(k);",
+                "    try { return o.getClass().getField(k).get(o); }",
+                "    catch (Exception e) { return null; }",
+                "}",
+            ]
+        if "_invoke" in self._needs_helpers:
+            lines += [
+                "@SuppressWarnings({\"rawtypes\",\"unchecked\"})",
+                "static Object _invoke(Object o, String k, Object... args) {",
+                "    if (o == null) return null;",
+                "    if (o instanceof Map) {",
+                "        Object fn = ((Map)o).get(k);",
+                "        if (fn instanceof Supplier) return ((Supplier)fn).get();",
+                "        if (fn instanceof Function && args.length >= 1) return ((Function)fn).apply(args[0]);",
+                "        if (fn instanceof BiFunction && args.length >= 2) return ((BiFunction)fn).apply(args[0], args[1]);",
+                "        if (fn instanceof Runnable) { ((Runnable)fn).run(); return null; }",
+                "        if (fn instanceof Consumer && args.length >= 1) { ((Consumer)fn).accept(args[0]); return null; }",
+                "        if (fn instanceof BiConsumer && args.length >= 2) { ((BiConsumer)fn).accept(args[0], args[1]); return null; }",
+                "        return null;",
+                "    }",
+                "    try {",
+                "        Class<?>[] ts = new Class[args.length];",
+                "        for (int i = 0; i < args.length; i++) ts[i] = Object.class;",
+                "        return o.getClass().getMethod(k, ts).invoke(o, args);",
+                "    } catch (Exception e) { return null; }",
+                "}",
+            ]
+        if "_len" in self._needs_helpers:
+            lines += [
+                "static int _len(Object o) {",
+                "    if (o instanceof CharSequence) return ((CharSequence)o).length();",
+                "    if (o instanceof Collection) return ((Collection<?>)o).size();",
+                "    if (o instanceof Map) return ((Map<?,?>)o).size();",
+                "    if (o != null && o.getClass().isArray()) return Array.getLength(o);",
+                "    return 0;",
+                "}",
+            ]
+        if "_set" in self._needs_helpers:
+            lines += [
+                "@SuppressWarnings({\"rawtypes\",\"unchecked\"})",
+                "static Object _set(Object o, String k, Object v) {",
+                "    if (o instanceof Map) { ((Map)o).put(k, v); return v; }",
+                "    try { o.getClass().getField(k).set(o, v); }",
+                "    catch (Exception e) {}",
+                "    return v;",
+                "}",
+            ]
+        if "_index" in self._needs_helpers:
+            lines += [
+                "@SuppressWarnings({\"rawtypes\",\"unchecked\"})",
+                "static Object _index(Object o, Object k) {",
+                "    if (o instanceof Map) return ((Map)o).get(k);",
+                "    if (o instanceof List) return ((List)o).get(((Number)k).intValue());",
+                "    if (o != null && o.getClass().isArray()) return Array.get(o, ((Number)k).intValue());",
+                "    return null;",
+                "}",
+            ]
+        return lines
+
     # ============================================================
-    # ENTRY POINT
+    # HOISTING HELPERS
+    # ============================================================
+
+    def _collect_var_hoists(self, stmts):
+        """Recopila nombres de 'var X' en una lista de sentencias, sin cruzar funciones/clases/arrows."""
+        names = []
+        for s in stmts:
+            self._walk_var_collect(s, names)
+        return names
+
+    def _walk_var_collect(self, node, names):
+        if isinstance(node, (EsJsParser.StmtFunDeclContext,
+                             EsJsParser.StmtClassDeclContext,
+                             EsJsParser.MetodoCtorContext,
+                             EsJsParser.MetodoNormalContext,
+                             EsJsParser.ExprFunExprContext,
+                             EsJsParser.ExprArrowContext)):
+            return
+        if isinstance(node, EsJsParser.StmtVarDeclContext):
+            decl = node.declVariable()
+            if decl.start.text == "var":
+                for vi in decl.varInit():
+                    names.append(vi.ID().getText())
+        if hasattr(node, "children") and node.children:
+            for child in node.children:
+                self._walk_var_collect(child, names)
+
+    def _last_is_return(self, stmts):
+        return bool(stmts) and isinstance(stmts[-1], EsJsParser.StmtReturnContext)
+
+    # ============================================================
+    # ENTRY POINT — programa
     # ============================================================
 
     def visitPrograma(self, ctx):
-        # Separar declaraciones de funcion/clase (van a class_members) del resto (va a main).
+        decl_stmts = []
+        main_stmts = []
         for s in ctx.sentencia():
-            if isinstance(s, EsJsParser.StmtFunDeclContext) or isinstance(s, EsJsParser.StmtClassDeclContext):
-                self.in_main = False
-                self.indent = 0
-                self.visit(s)
-                self.emit("")  # linea en blanco entre miembros
+            if isinstance(s, (EsJsParser.StmtFunDeclContext, EsJsParser.StmtClassDeclContext)):
+                decl_stmts.append(s)
             else:
-                self.in_main = True
-                self.indent = 0
-                self.visit(s)
+                main_stmts.append(s)
+
+        # Hoist 'var X' del scope global como static fields
+        global_vars = self._collect_var_hoists(main_stmts)
+        self._hoisted_vars = set(global_vars)
+
+        self.in_main = False
+        self.indent = 0
+        for vn in sorted(set(global_vars)):
+            self.emit(f"static Object {vn} = null;")
+        if global_vars:
+            self.emit("")
+
+        # Emit function/class declarations
+        for s in decl_stmts:
+            self.in_main = False
+            self.indent = 0
+            self.visit(s)
+            self.emit("")
+
+        # Emit main body
+        self.in_main = True
+        self.indent = 0
+        for s in main_stmts:
+            self.visit(s)
 
     # ============================================================
     # SENTENCIAS
@@ -177,15 +327,77 @@ class JavaEmitter(EsJsVisitor):
     def visitStmtVarDecl(self, ctx):
         decl = ctx.declVariable()
         kind = decl.start.text  # 'const' | 'mut' | 'var'
-        prefix = "final var " if kind == "const" else "var "
+
         for vi in decl.varInit():
             nombre = vi.ID().getText()
-            if vi.expresion():
-                valor = self.visit(vi.expresion())
-                self.emit(f"{prefix}{nombre} = {valor};")
-            else:
-                # var requiere inicializador en Java; sin valor usamos Object.
+            valor_ctx = vi.expresion()
+
+            # Caso especial: var/mut/const X = (params) => body  =>  emitir como static method
+            if valor_ctx is not None and isinstance(valor_ctx, EsJsParser.ExprArrowContext):
+                self._emit_arrow_as_method(nombre, valor_ctx)
+                continue
+
+            valor_str = self.visit(valor_ctx) if valor_ctx is not None else None
+
+            if kind == "var":
+                # Si esta hoisteada a nivel global, ya esta declarada como static field
+                # Si esta hoisteada localmente, ya esta declarada al tope de la funcion
+                # En cualquier caso emitimos solo la asignacion
+                if valor_str is not None:
+                    self.emit(f"{nombre} = {valor_str};")
+                # sin valor: nada que emitir (queda en null hoisteado)
+                continue
+
+            # mut / const
+            if valor_str is None:
                 self.emit(f"Object {nombre} = null;")
+            elif valor_str == "null":
+                # var no infiere null; usamos Object
+                if kind == "const":
+                    self.emit(f"final Object {nombre} = null;")
+                else:
+                    self.emit(f"Object {nombre} = null;")
+            else:
+                prefix = "final var " if kind == "const" else "var "
+                self.emit(f"{prefix}{nombre} = {valor_str};")
+
+    def _emit_arrow_as_method(self, name, arrow_ctx):
+        """Emite 'var X = (params) => body' como static method del Programa.
+        Hace el truco que en Java permite invocar X(args) como cualquier funcion."""
+        params = [tok.getText() for tok in arrow_ctx.ID()]
+        params_str = ", ".join(f"Object {p}" for p in params)
+
+        saved_in_main = self.in_main
+        saved_indent = self.indent
+        saved_local = self._local_hoisted
+        self.in_main = False
+        self.indent = 0
+
+        self.emit(f"static Object {name}({params_str}) {{")
+        self.indent += 1
+
+        body = arrow_ctx.arrowBody()
+        if body.bloque():
+            block_stmts = list(body.bloque().sentencia())
+            local_hoists = self._collect_var_hoists(block_stmts)
+            self._local_hoisted = set(local_hoists)
+            for vn in sorted(set(local_hoists)):
+                self.emit(f"Object {vn} = null;")
+            for s in block_stmts:
+                self.visit(s)
+            if not self._last_is_return(block_stmts):
+                self.emit("return null;")
+        else:
+            ret = self.visit(body.expresion())
+            self.emit(f"return {ret};")
+
+        self.indent -= 1
+        self.emit("}")
+        self.emit("")
+
+        self.in_main = saved_in_main
+        self.indent = saved_indent
+        self._local_hoisted = saved_local
 
     def visitStmtFunDecl(self, ctx):
         df = ctx.declFuncion()
@@ -193,9 +405,21 @@ class JavaEmitter(EsJsVisitor):
         params = ", ".join(f"Object {p.getText()}" for p in df.parametros().ID())
         self.emit(f"static Object {nombre}({params}) {{")
         self.indent += 1
-        self._emit_block_body(list(df.bloque().sentencia()))
-        # default return — Java exige return en metodos no void
-        self.emit("return null;")
+
+        block_stmts = list(df.bloque().sentencia())
+        # Hoist 'var' locales dentro de la funcion
+        saved_local = self._local_hoisted
+        local_hoists = self._collect_var_hoists(block_stmts)
+        self._local_hoisted = set(local_hoists)
+        for vn in sorted(set(local_hoists)):
+            self.emit(f"Object {vn} = null;")
+
+        self._emit_block_body(block_stmts)
+
+        if not self._last_is_return(block_stmts):
+            self.emit("return null;")
+
+        self._local_hoisted = saved_local
         self.indent -= 1
         self.emit("}")
 
@@ -223,7 +447,6 @@ class JavaEmitter(EsJsVisitor):
         self.emit("}")
 
     def _collect_fields(self, class_ctx):
-        """Camina los metodos de la clase y extrae todos los nombres de campo asignados via this.X = ..."""
         fields = set()
         for m in class_ctx.metodo():
             self._walk_for_this_assign(m, fields)
@@ -232,7 +455,8 @@ class JavaEmitter(EsJsVisitor):
     def _walk_for_this_assign(self, node, fields):
         if isinstance(node, EsJsParser.ExprAssignContext):
             left = node.expresion(0)
-            if isinstance(left, EsJsParser.ExprMemberContext) and isinstance(left.expresion(), EsJsParser.ExprThisContext):
+            if isinstance(left, EsJsParser.ExprMemberContext) and isinstance(left.expresion(),
+                    (EsJsParser.ExprThisContext, EsJsParser.ExprAmbienteContext)):
                 fields.add(left.memberName().getText())
         if hasattr(node, "children") and node.children:
             for child in node.children:
@@ -251,14 +475,15 @@ class JavaEmitter(EsJsVisitor):
         params = ", ".join(f"Object {p.getText()}" for p in ctx.parametros().ID())
         self.emit(f"public Object {nombre}({params}) {{")
         self.indent += 1
-        self._emit_block_body(list(ctx.bloque().sentencia()))
-        self.emit("return null;")
+        block_stmts = list(ctx.bloque().sentencia())
+        self._emit_block_body(block_stmts)
+        if not self._last_is_return(block_stmts):
+            self.emit("return null;")
         self.indent -= 1
         self.emit("}")
 
     def visitStmtIf(self, ctx):
-        # Recoger toda la cadena si/sino-si/sino para emitir como if/else-if/else.
-        branches = []   # [(cond_ctx, body_ctx)]
+        branches = []
         else_branch = None
         current = ctx.sentenciaSi()
         while True:
@@ -324,15 +549,12 @@ class JavaEmitter(EsJsVisitor):
         self.emit("}")
 
     def visitParaC(self, ctx):
-        # init
         init_str = ""
         if ctx.forInit():
             fi = ctx.forInit()
             if fi.declVariable():
                 decl = fi.declVariable()
                 kind = decl.start.text
-                # for-init en Java: solo una declaracion (multiples vars requieren mismo tipo).
-                # Usamos var con la primera; si hay multiples, sera invalido pero emitimos lo mejor posible.
                 inits = []
                 for vi in decl.varInit():
                     v = self.visit(vi.expresion()) if vi.expresion() else "null"
@@ -414,44 +636,128 @@ class JavaEmitter(EsJsVisitor):
     def visitExprMember(self, ctx):
         obj_ctx = ctx.expresion()
         name = ctx.memberName().getText()
+
+        # consola.X
         if isinstance(obj_ctx, EsJsParser.ExprConsolaContext):
             if name in CONSOLA_METODOS:
                 return CONSOLA_METODOS[name]
-            # consola.limpiar se maneja en visitExprCall
             if name == "limpiar":
                 return "__consola_limpiar_marker"
+
+        # Mate.X
         if isinstance(obj_ctx, EsJsParser.ExprMateContext):
+            if name in MATE_CONSTS_ESPECIAL:
+                return MATE_CONSTS_ESPECIAL[name]
             return f"Math.{MATE_METODOS.get(name, name)}"
+
+        # Numero.X
+        if _is_id_named(obj_ctx, "Numero"):
+            if name in NUMERO_PROPS:
+                return NUMERO_PROPS[name]
+            return f"__Numero_{name}"
+
+        # this.X / ambiente.X — acceso directo (campo declarado en la clase)
+        if isinstance(obj_ctx, (EsJsParser.ExprThisContext, EsJsParser.ExprAmbienteContext)):
+            return f"this.{name}"
+
+        # x.longitud — usar helper que cubre String/Collection/Map/array
         if name == "longitud":
-            # Aproximacion: .length (funciona en arrays, no en List/String)
-            return f"{self.visit(obj_ctx)}.length"
-        return f"{self.visit(obj_ctx)}.{name}"
+            self._needs_helpers.add("_len")
+            return f"_len({self.visit(obj_ctx)})"
+
+        # Resto: acceso dinamico via reflexion/Map.get
+        self._needs_helpers.add("_prop")
+        return f'_prop({self.visit(obj_ctx)}, "{name}")'
 
     def visitExprIndex(self, ctx):
-        return f"{self.visit(ctx.expresion(0))}[{self.visit(ctx.expresion(1))}]"
+        # En EsJS obj[k] puede ser array (k=int), Map (k=string), o List (k=int).
+        # Usamos helper para no comprometernos al tipo en compile-time.
+        self._needs_helpers.add("_index")
+        return f"_index({self.visit(ctx.expresion(0))}, {self.visit(ctx.expresion(1))})"
 
     def visitExprCall(self, ctx):
         callee_ctx = ctx.expresion()
         args_node = ctx.argumentos()
         args_list = list(args_node.expresion()) if args_node else []
-        args_str = ", ".join(self.visit(a) for a in args_list)
+        args_strs = [self.visit(a) for a in args_list]
+        args_str = ", ".join(args_strs)
 
-        # Caso especial: consola.limpiar() -> ANSI escape
-        if isinstance(callee_ctx, EsJsParser.ExprMemberContext):
-            inner = callee_ctx.expresion()
-            if isinstance(inner, EsJsParser.ExprConsolaContext):
-                if callee_ctx.memberName().getText() == "limpiar":
-                    return 'System.out.print("\\u001b[2J\\u001b[H")'
+        # Funciones globales reservadas (absoluto(x) -> Math.abs(x))
+        if isinstance(callee_ctx, EsJsParser.ExprIdContext):
+            fname = callee_ctx.ID().getText()
+            if fname in FUNCIONES_GLOBALES:
+                return f"{FUNCIONES_GLOBALES[fname]}({args_str})"
 
-        # Caso especial: super(args) -> super(args) (literal Java)
+        # super(args) -> super(args)
         if isinstance(callee_ctx, EsJsParser.ExprSuperContext):
             return f"super({args_str})"
+
+        # Casos especiales sobre miembros
+        if isinstance(callee_ctx, EsJsParser.ExprMemberContext):
+            inner_ctx = callee_ctx.expresion()
+            method_name = callee_ctx.memberName().getText()
+
+            # consola.escribir/info/error(...) — manejar multiples argumentos
+            if isinstance(inner_ctx, EsJsParser.ExprConsolaContext) and method_name in CONSOLA_METODOS:
+                target = CONSOLA_METODOS[method_name]
+                if len(args_strs) == 0:
+                    return f"{target}()"
+                if len(args_strs) == 1:
+                    return f"{target}({args_strs[0]})"
+                # multi-arg: concatenar separados por espacio (como JS console.log)
+                concat = ' + " " + '.join(f"String.valueOf({a})" for a in args_strs)
+                return f"{target}({concat})"
+
+            # consola.limpiar()
+            if isinstance(inner_ctx, EsJsParser.ExprConsolaContext) and method_name == "limpiar":
+                return 'System.out.print("\\u001b[2J\\u001b[H")'
+
+            # Numero.X(args)
+            if _is_id_named(inner_ctx, "Numero"):
+                first = args_str
+                if method_name == "interpretarDecimal":
+                    return f"Double.parseDouble(String.valueOf({first}))"
+                if method_name == "interpretarEntero":
+                    return f"Integer.parseInt(String.valueOf({first}))"
+                if method_name == "esFinito":
+                    return f"Double.isFinite(((Number)({first})).doubleValue())"
+                if method_name == "esEntero":
+                    return f"(((Number)({first})).doubleValue() == Math.floor(((Number)({first})).doubleValue()))"
+                if method_name == "esEnteroSeguro":
+                    return (f"(((Number)({first})).doubleValue() == Math.floor(((Number)({first})).doubleValue())"
+                            f" && Math.abs(((Number)({first})).doubleValue()) <= 9007199254740991.0)")
+                if method_name == "esNuN":
+                    return f"Double.isNaN(((Number)({first})).doubleValue())"
+
+            # Metodos de instancia tipo-Numero sobre cualquier expresion
+            inner_str = self.visit(inner_ctx)
+            if method_name == "aCadena":
+                return f"String.valueOf({inner_str})"
+            if method_name == "fijarDecimales":
+                return (f'String.format(Locale.US, "%." + ({args_str}) + "f", '
+                        f'((Number)({inner_str})).doubleValue())')
+            if method_name == "valorDe":
+                return inner_str
+            if method_name == "aExponencial":
+                return f'String.format(Locale.US, "%e", ((Number)({inner_str})).doubleValue())'
+
+            # Si llegamos aca, es una llamada metodo sobre un objeto dinamico.
+            # Mate ya retorno "Math.x" (statico, callable directo). this/ambiente tambien.
+            # Para los demas (incluidas instancias de clase), usar reflexion para evitar errores de compilacion.
+            if isinstance(inner_ctx, (EsJsParser.ExprThisContext, EsJsParser.ExprAmbienteContext,
+                                       EsJsParser.ExprMateContext, EsJsParser.ExprConsolaContext)):
+                callee = self.visit(callee_ctx)
+                return f"{callee}({args_str})"
+            # Reflexion
+            self._needs_helpers.add("_invoke")
+            extra = f", {args_str}" if args_str else ""
+            return f'_invoke({inner_str}, "{method_name}"{extra})'
 
         callee = self.visit(callee_ctx)
         return f"{callee}({args_str})"
 
     def visitExprPostfix(self, ctx):
-        return f"{self.visit(ctx.expresion())}{ctx.op.text}"  # i++ / i--
+        return f"{self.visit(ctx.expresion())}{ctx.op.text}"
 
     def visitExprUnary(self, ctx):
         op = ctx.op.text
@@ -492,8 +798,11 @@ class JavaEmitter(EsJsVisitor):
 
     def visitExprEq(self, ctx):
         op = ctx.op.text
-        py_op = "==" if op in ("==", "===") else "!="
-        return f"({self.visit(ctx.expresion(0))} {py_op} {self.visit(ctx.expresion(1))})"
+        left = self.visit(ctx.expresion(0))
+        right = self.visit(ctx.expresion(1))
+        if op in ("==", "==="):
+            return f"Objects.equals({left}, {right})"
+        return f"(!Objects.equals({left}, {right}))"
 
     def visitExprAnd(self, ctx):
         return f"({self.visit(ctx.expresion(0))} && {self.visit(ctx.expresion(1))})"
@@ -505,32 +814,55 @@ class JavaEmitter(EsJsVisitor):
         return f"({self.visit(ctx.expresion(0))} ? {self.visit(ctx.expresion(1))} : {self.visit(ctx.expresion(2))})"
 
     def visitExprAssign(self, ctx):
-        target = self.visit(ctx.expresion(0))
-        value = self.visit(ctx.expresion(1))
-        return f"{target} {ctx.op.text} {value}"
+        left_ctx = ctx.expresion(0)
+        value_str = self.visit(ctx.expresion(1))
+        op = ctx.op.text
+
+        # Caso especial: obj.X = value sobre objeto dinamico (no this/super/Mate/consola)
+        # No podemos hacer "_prop(obj, X) = value", usamos _set.
+        if op == "=" and isinstance(left_ctx, EsJsParser.ExprMemberContext):
+            inner_ctx = left_ctx.expresion()
+            if not isinstance(inner_ctx, (EsJsParser.ExprThisContext, EsJsParser.ExprAmbienteContext,
+                                           EsJsParser.ExprMateContext, EsJsParser.ExprConsolaContext)):
+                self._needs_helpers.add("_set")
+                obj_str = self.visit(inner_ctx)
+                name = left_ctx.memberName().getText()
+                return f'_set({obj_str}, "{name}", {value_str})'
+
+        target = self.visit(left_ctx)
+        return f"{target} {op} {value_str}"
 
     def visitExprArrow(self, ctx):
+        # Caso "suelto" (no asignado a una variable): lambda real
         params = [tok.getText() for tok in ctx.ID()]
         body_ctx = ctx.arrowBody()
         if body_ctx.bloque():
-            return f"({', '.join(params)}) -> null /* cuerpo de flecha en bloque: traduccion no soportada */"
+            return f"({', '.join(params)}) -> null /* cuerpo de flecha en bloque: usar mut/var/const X = (params) => {{ ... }} para traducir como metodo */"
         body_str = self.visit(body_ctx.expresion())
         return f"({', '.join(params)}) -> {body_str}"
 
     def visitExprFunExpr(self, ctx):
         nombre = ctx.ID().getText() if ctx.ID() else "_anon"
-        return f"null /* funcion expresion {nombre} no soportada en Java */"
+        return f"null /* funcion expresion {nombre} no traducible directamente */"
 
     def visitExprParen(self, ctx):
         return f"({self.visit(ctx.expresion())})"
 
     def visitExprArray(self, ctx):
         elems = [self.visit(e) for e in ctx.expresion()]
-        return f"List.of({', '.join(elems)})"
+        # ArrayList mutable (List.of() es inmutable y rompe agregar)
+        if not elems:
+            return "new ArrayList<>()"
+        return f"new ArrayList<>(List.of({', '.join(elems)}))"
 
     def visitExprObject(self, ctx):
+        # HashMap mutable para soportar agregados dinamicos
         items = [self.visit(p) for p in ctx.propiedad()]
-        return f"Map.of({', '.join(items)})"
+        # Filtrar items vacios (de PropMetodo que skipea)
+        items = [it for it in items if it]
+        if not items:
+            return "new HashMap<>()"
+        return f"new HashMap<>(Map.ofEntries({', '.join(items)}))"
 
     def visitPropConValor(self, ctx):
         if ctx.ID():
@@ -539,11 +871,15 @@ class JavaEmitter(EsJsVisitor):
             key = java_string(_strip_quotes(ctx.STR().getText()))
         else:
             key = ctx.NUM().getText()
-        return f"{key}, {self.visit(ctx.expresion())}"
+        return f"Map.entry({key}, {self.visit(ctx.expresion())})"
 
     def visitPropShorthand(self, ctx):
         name = ctx.ID().getText()
-        return f'"{name}", {name}'
+        return f'Map.entry("{name}", {name})'
+
+    def visitPropMetodo(self, ctx):
+        # Java no permite metodos dentro de Map literal. Lo omitimos con un comentario; el objeto resultante NO tendra ese metodo.
+        return ""
 
     # ----- literales y nombres -----
     def visitExprNum(self, ctx):    return ctx.NUM().getText()
@@ -556,6 +892,7 @@ class JavaEmitter(EsJsVisitor):
     def visitExprNaN(self, ctx):    return "Double.NaN"
     def visitExprThis(self, ctx):   return "this"
     def visitExprSuper(self, ctx):  return "super"
+    def visitExprAmbiente(self, ctx): return "this"     # ambiente en EsJS == this de JS
     def visitExprConsola(self, ctx):return "System.out"
     def visitExprMate(self, ctx):   return "Math"
     def visitExprId(self, ctx):     return ctx.ID().getText()

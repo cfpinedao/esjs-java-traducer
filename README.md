@@ -30,9 +30,9 @@ Necesitas también `javac` y `java` para compilar y ejecutar la salida.
 # 2) Traducir un programa EsJS a Java
 python3 traductor.py < ejemplos/hola.esjs > Programa.java
 
-# 3) Compilar y ejecutar
-javac Programa.java
-java Programa
+# 3) Compilar y ejecutar (con encoding explicito para evitar problemas con tildes)
+javac -encoding UTF-8 Programa.java
+java -Dfile.encoding=UTF-8 Programa
 ```
 
 ## Cómo se traduce la estructura
@@ -94,6 +94,14 @@ public class Programa {
 | `{a: 1}` | `Map.of("a", 1)` |
 | `x.longitud` | `x.length` |
 
+## Pipeline interno
+
+- **Hoisting de `var`** y `funcion`: pre-scan del programa para emitir `static Object X = null;` arriba (vars de top-level) y declararse al tope de la funcion contenedora (vars locales). Las `funcion` se emiten como `static` methods del Programa.
+- **Arrow asignada a variable** (`mut f = (x) => ...`): se convierte en `static Object f(Object x) { ... }`, lo que permite invocar `f(x)` como llamada normal.
+- **Igualdad** (`==`, `===`): se traduce a `Objects.equals(a, b)` para evitar errores de tipos cruzados en Java. **Cuidado**: difiere de JS — `30 == "30"` da `false` en Java (Integer vs String) en vez de `true` (coercion JS).
+- **Acceso dinamico** (`obj.prop`, `obj[k]`, `obj.metodo(args)`): se enruta via helpers `_prop`/`_index`/`_invoke` que prueban primero Map/List/Array y caen a reflexion para clases. Permite que tanto objetos literales (Maps) como instancias de clase funcionen sin tipos en compile-time.
+- **`ambiente`** se reescribe a `this` (acceso al objeto enclosing — en EsJS es el equivalente a `this` dentro de metodos).
+
 ## Limitaciones conocidas
 
 Java es estáticamente tipado; EsJS no. La traducción es **estructuralmente fiel** pero la salida no siempre compila tal cual:
@@ -108,3 +116,14 @@ Java es estáticamente tipado; EsJS no. La traducción es **estructuralmente fie
 - **`tipoDe`**: devuelve nombre de clase Java, no el string JS (`"Integer"` en vez de `"number"`).
 
 Para corregir esos casos automáticamente se necesitaría un runtime helper con métodos polimórficos — fuera del alcance de un traductor académico simple.
+
+## Resultados sobre `UNCodeTests/`
+
+| Test | Compila | Ejecuta | Notas |
+|---|---|---|---|
+| 01 | ✓ | ✓ | Variables, `si/sino`, concatenacion |
+| 02 | ✓ | ✓ | `elegir/caso`, `para` |
+| 03 | ✓ | ✓ (con diferencias semanticas de JS) | `30 == "30"` da `false` por estricto Java |
+| 04 | ✓ | ✓ | Flechas como metodos, `Numero.*`, `Mate.*`, `Locale.US` |
+| 05 | ✓ | parcial | Compila pero los metodos del objeto literal son no-ops (Java no permite metodos en Map sin anonimas) |
+| 06 | ✓ | ✓ | Hoisting de `var` y `funcion` funciona |
